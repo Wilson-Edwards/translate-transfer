@@ -62,19 +62,6 @@ func (a *App) translationProxy(c *gin.Context, name string, profile TranslationP
 	}
 	log.Printf("是否为单词输入: %t, 原文本: %q, 规范化后: %q", isWordInput, userMessageText, effectiveUserText)
 
-	if name == "Zotero JSON" && isWordInput {
-		cacheEnabled := a.cacheEnabled()
-		log.Printf("缓存启用状态: %t", cacheEnabled)
-		if cacheEnabled {
-			_, found := a.getCachedWord(profile.TargetLanguage, effectiveUserText)
-			if found {
-				log.Println("缓存检查结果: 命中")
-			} else {
-				log.Println("缓存检查结果: 未命中")
-			}
-		}
-	}
-
 	outgoing, err := a.buildOutgoingPayload(incoming, profile, isWordInput, userTextOverride(isWordInput, effectiveUserText))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

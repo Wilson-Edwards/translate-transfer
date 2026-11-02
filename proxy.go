@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -19,36 +20,33 @@ const cachedStreamChunkRunes = 512
 func (a *App) proxyDeepSeek(c *gin.Context, payload map[string]interface{}, targetLanguage, word string) {
 	cacheEnabled := a.cacheEnabled()
 	if word != "" && cacheEnabled {
-		if cacheContent, found := a.getCachedWord(targetLanguage, word); found {
-			if boolValue(payload["stream"]) {
-				a.writeCachedStream(c, payload, cacheContent)
-				return
-			}
-
-			c.Data(http.StatusOK, "application/json", mustJSONBytes(gin.H{
-				"choices": []gin.H{
-					{
-						"message": gin.H{
-							"role":    "assistant",
-							"content": cacheContent,
-						},
-					},
-				},
-			}))
+		cacheContent, found, err := a.getCachedWord(c.Request.Context(), targetLanguage, word)
+		switch {
+		case err != nil:
+			log.Printf("缓存查询失败: target_language=%q word=%q error=%v", targetLanguage, word, err)
+		case found:
+			log.Printf("缓存检查结果: 命中, target_language=%q word=%q", targetLanguage, word)
+			a.writeCachedResponse(c, payload, cacheContent)
 			return
+		default:
+			log.Printf("缓存检查结果: 未命中, target_language=%q word=%q", targetLanguage, word)
 		}
 	}
 
-	apiKey := ""
+	apiKey := a.deepSeekAPIKey()
+	if apiKey == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "upstream_unavailable",
+			"details": "DeepSeek API key is not configured",
+		})
+		return
+	}
+
 	targetURL := defaultURL
 	if a.localConfig != nil {
-		apiKey = a.localConfig.Relay.APIKey
 		if strings.TrimSpace(a.localConfig.Relay.URL) != "" {
 			targetURL = strings.TrimSpace(a.localConfig.Relay.URL)
 		}
-	}
-	if apiKey == "" {
-		apiKey = os.Getenv("DEEPSEEK_API_KEY")
 	}
 
 	body, err := json.Marshal(payload)
@@ -104,10 +102,8 @@ func (a *App) proxyDeepSeek(c *gin.Context, payload map[string]interface{}, targ
 	if err := json.Unmarshal(responseBody, &responseData); err == nil {
 		if choices, ok := responseData["choices"].([]interface{}); ok && len(choices) > 0 {
 			if word != "" && cacheEnabled {
-				if _, found := a.getCachedWord(targetLanguage, word); !found {
-					if assistantMessage := assistantContent(choices[0]); assistantMessage != "" {
-						a.cacheWordTranslation(targetLanguage, word, assistantMessage)
-					}
+				if assistantMessage := assistantContent(choices[0]); assistantMessage != "" {
+					a.cacheWordTranslation(targetLanguage, word, assistantMessage)
 				}
 			}
 			c.Data(upstream.StatusCode, contentType, responseBody)
@@ -122,6 +118,33 @@ func (a *App) proxyDeepSeek(c *gin.Context, payload map[string]interface{}, targ
 	}
 
 	c.Data(upstream.StatusCode, contentType, responseBody)
+}
+
+func (a *App) deepSeekAPIKey() string {
+	if a.localConfig != nil {
+		if apiKey := strings.TrimSpace(a.localConfig.Relay.APIKey); apiKey != "" {
+			return apiKey
+		}
+	}
+	return strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
+}
+
+func (a *App) writeCachedResponse(c *gin.Context, payload map[string]interface{}, cacheContent string) {
+	if boolValue(payload["stream"]) {
+		a.writeCachedStream(c, payload, cacheContent)
+		return
+	}
+
+	c.Data(http.StatusOK, "application/json", mustJSONBytes(gin.H{
+		"choices": []gin.H{
+			{
+				"message": gin.H{
+					"role":    "assistant",
+					"content": cacheContent,
+				},
+			},
+		},
+	}))
 }
 
 func (a *App) writeCachedStream(c *gin.Context, payload map[string]interface{}, cacheContent string) {
@@ -264,9 +287,7 @@ func (a *App) proxyStream(c *gin.Context, upstream *http.Response, targetLanguag
 	}
 
 	if word != "" && translationBuffer.Len() > 0 && cacheEnabled {
-		if _, found := a.getCachedWord(targetLanguage, word); !found {
-			a.cacheWordTranslation(targetLanguage, word, translationBuffer.String())
-		}
+		a.cacheWordTranslation(targetLanguage, word, translationBuffer.String())
 	}
 }
 

@@ -111,42 +111,45 @@ func ensureMySQLDatabase(host string, port int, username, password, dbname, para
 }
 
 func (a *App) cacheEnabled() bool {
-	return a.localConfig != nil && (a.localConfig.Relay.Cache == nil || *a.localConfig.Relay.Cache)
+	return a.localConfig == nil || a.localConfig.Relay.Cache == nil || *a.localConfig.Relay.Cache
 }
 
 func wordCacheKey(targetLanguage, word string) string {
 	return strings.ToLower(strings.TrimSpace(targetLanguage)) + ":" + strings.ToLower(strings.TrimSpace(word))
 }
 
-func (a *App) getCachedWord(targetLanguage, word string) (string, bool) {
-	if a.db == nil {
-		return "", false
-	}
-
-	lowerWord := strings.ToLower(word)
+func (a *App) getCachedWord(ctx context.Context, targetLanguage, word string) (string, bool, error) {
+	targetLanguage = strings.TrimSpace(targetLanguage)
+	lowerWord := strings.ToLower(strings.TrimSpace(word))
 	cacheKey := wordCacheKey(targetLanguage, lowerWord)
 	if value, ok := a.wordCache.Load(cacheKey); ok {
 		if translation, ok := value.(string); ok {
-			return translation, true
+			return translation, true, nil
 		}
 	}
 
-	var translationResult string
-	err := a.db.WithContext(context.Background()).
-		Model(&WordCache{}).
-		Select("translation_result").
-		Where("target_language = ? AND word = ?", targetLanguage, lowerWord).
-		Limit(1).
-		Scan(&translationResult).Error
-	if err != nil {
-		return "", false
-	}
-	if translationResult == "" {
-		return "", false
+	if a.db == nil {
+		return "", false, errors.New("word cache database is not initialized")
 	}
 
-	a.wordCache.Store(cacheKey, translationResult)
-	return translationResult, true
+	var cache WordCache
+	err := a.db.WithContext(ctx).
+		Select("translation_result").
+		Where("target_language = ? AND word = ?", targetLanguage, lowerWord).
+		Take(&cache).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if strings.TrimSpace(cache.TranslationResult) == "" {
+		log.Printf("缓存数据为空: target_language=%q word=%q", targetLanguage, lowerWord)
+		return "", false, nil
+	}
+
+	a.wordCache.Store(cacheKey, cache.TranslationResult)
+	return cache.TranslationResult, true, nil
 }
 
 func (a *App) cacheWordTranslation(targetLanguage, word, translationResult string) bool {
@@ -154,7 +157,8 @@ func (a *App) cacheWordTranslation(targetLanguage, word, translationResult strin
 		return false
 	}
 
-	lowerWord := strings.ToLower(word)
+	targetLanguage = strings.TrimSpace(targetLanguage)
+	lowerWord := strings.ToLower(strings.TrimSpace(word))
 	cacheKey := wordCacheKey(targetLanguage, lowerWord)
 	var cache WordCache
 	err := a.db.WithContext(context.Background()).Where("target_language = ? AND word = ?", targetLanguage, lowerWord).First(&cache).Error

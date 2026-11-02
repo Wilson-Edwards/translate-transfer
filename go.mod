@@ -3,6 +3,7 @@ module translate-transfer
 go 1.22
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/gin-gonic/gin v1.10.1
 	github.com/go-sql-driver/mysql v1.7.0
 	gopkg.in/yaml.v3 v3.0.1
